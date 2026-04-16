@@ -1,8 +1,10 @@
 # Individual Report — Assignment 11: Defense-in-Depth Pipeline
 
-**Student Name:** Nguyễn Huy Tú
+**Student Name:** Nguyễn Huy Tú  
 **Student ID:** 2A202600170  
 **Date:** 2026-04-16
+
+**Please read /src as result instead of notebooks**
 
 ---
 
