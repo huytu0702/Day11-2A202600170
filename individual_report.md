@@ -8,6 +8,26 @@
 
 ---
 
+## 0. Pipeline
+
+Mermaid view of the runtime flow in `src/pipeline/defense_pipeline.py`:
+
+```mermaid
+flowchart TD
+    A[User Request] --> B[RateLimitPlugin<br/>before_run]
+    B --> C[InputGuardrailPlugin<br/>before_run]
+    C --> D[SessionAnomalyPlugin<br/>before_run]
+    D --> E[LLM Agent<br/>gemini-2.5-flash-lite]
+    E --> F[OutputGuardrailPlugin<br/>after_model]
+    F --> G{use_llm_judge?}
+    G -->|Yes| H[LlmJudgePlugin<br/>after_model]
+    G -->|No| I[AuditLogPlugin<br/>after_model]
+    H --> I
+    I --> J[Final Response + Logged Record]
+```
+
+---
+
 ## 1. Layer Analysis — Which Layer Caught Each Attack First?
 
 The table below is based on the **actual `audit_log.json`** produced by running `src/run_assignment11.py`. Attacks 1–5 were blocked by `InputGuardrailPlugin` before the LLM was called. Attacks 6–7 reached the pipeline after 10 requests had already been made in Tests 1 and 2, so the **RateLimitPlugin** triggered first.
