@@ -39,14 +39,20 @@ def content_filter(response: str) -> dict:
     issues = []
     redacted = response
 
-    # PII patterns to check
+    # PII patterns to check.
+    # Each key names the data type for clear issue reporting.
+    # Patterns are designed to match real VinBank data formats.
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "vn_phone": r"\b0\d{9,10}\b",
+        "email": r"[\w.\-]+@[\w.\-]+\.[a-zA-Z]{2,}",
+        # Vietnamese national ID — 9-digit CMND or 12-digit CCCD
+        "national_id": r"\b\d{12}\b|\b\d{9}\b",
+        # API key — catches the sk- prefix format used in the system prompt
+        "api_key": r"sk-[a-zA-Z0-9\-]+",
+        # Password pattern — catches "password: value" and "password=value"
+        "password": r"password\s*[:=]\s*\S+",
+        # Raw database connection strings
+        "db_connection": r"\b[\w\-]+\.internal\b",
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -89,15 +95,14 @@ Respond with ONLY one word: SAFE or UNSAFE
 If UNSAFE, add a brief reason on the next line.
 """
 
-# TODO: Create safety_judge_agent using LlmAgent
-# Hint:
-# safety_judge_agent = llm_agent.LlmAgent(
-#     model="gemini-2.0-flash",
-#     name="safety_judge",
-#     instruction=SAFETY_JUDGE_INSTRUCTION,
-# )
+# The judge is a separate LLM agent so it cannot be manipulated by the same
+# prompt that tricked the main agent — this is the key value of LLM-as-Judge.
+safety_judge_agent = llm_agent.LlmAgent(
+    model="gemini-2.5-flash-lite",
+    name="safety_judge",
+    instruction=SAFETY_JUDGE_INSTRUCTION,
+)
 
-safety_judge_agent = None  # TODO: Replace with implementation
 judge_runner = None
 
 
@@ -172,16 +177,36 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        # Step 1: Regex-based PII / secret redaction.
+        # This is fast and deterministic — catches API keys, passwords, and phone
+        # numbers even when the LLM ignores its own instruction to keep them hidden.
+        filter_result = content_filter(response_text)
+        if not filter_result["safe"]:
+            self.redacted_count += 1
+            # Replace the response content with the redacted version so PII never
+            # reaches the user, while still returning a useful (sanitised) answer.
+            llm_response.content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=filter_result["redacted"])],
+            )
+            response_text = filter_result["redacted"]
 
-        return llm_response  # TODO: modify if needed
+        # Step 2: LLM-as-Judge safety check.
+        # The regex filter misses subtle leaks (e.g., paraphrased secrets or
+        # hallucinated harmful content). The judge LLM catches these edge cases.
+        if self.use_llm_judge:
+            judge_result = await llm_safety_check(response_text)
+            if not judge_result["safe"]:
+                self.blocked_count += 1
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(
+                        text="I'm sorry, I'm unable to provide that information. "
+                             "Please contact VinBank customer support for assistance."
+                    )],
+                )
+
+        return llm_response
 
 
 # ============================================================

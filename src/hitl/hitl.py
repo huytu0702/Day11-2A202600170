@@ -65,32 +65,47 @@ class ConfidenceRouter:
         Returns:
             RoutingDecision with routing action and metadata
         """
-        # TODO 12: Implement routing logic
-        #
-        # 1. Check if action_type is in HIGH_RISK_ACTIONS
-        #    -> If yes: always escalate (action="escalate", priority="high",
-        #       requires_human=True, reason="High-risk action: {action_type}")
-        #
-        # 2. Check confidence thresholds:
-        #    - confidence >= 0.9:
-        #      action="auto_send", priority="low",
-        #      requires_human=False, reason="High confidence"
-        #
-        #    - 0.7 <= confidence < 0.9:
-        #      action="queue_review", priority="normal",
-        #      requires_human=True, reason="Medium confidence — needs review"
-        #
-        #    - confidence < 0.7:
-        #      action="escalate", priority="high",
-        #      requires_human=True, reason="Low confidence — escalating"
+        # High-risk actions must always involve a human regardless of confidence.
+        # A 99%-confident AI recommendation to transfer $100,000 is still too risky
+        # to auto-approve — the stakes outweigh the automation benefit.
+        if action_type in HIGH_RISK_ACTIONS:
+            return RoutingDecision(
+                action="escalate",
+                confidence=confidence,
+                reason=f"High-risk action: {action_type}",
+                priority="high",
+                requires_human=True,
+            )
 
+        # High confidence: the agent is sure enough for auto-send.
+        if confidence >= self.HIGH_THRESHOLD:
+            return RoutingDecision(
+                action="auto_send",
+                confidence=confidence,
+                reason="High confidence",
+                priority="low",
+                requires_human=False,
+            )
+
+        # Medium confidence: human review improves quality but isn't urgent.
+        if confidence >= self.MEDIUM_THRESHOLD:
+            return RoutingDecision(
+                action="queue_review",
+                confidence=confidence,
+                reason="Medium confidence — needs review",
+                priority="normal",
+                requires_human=True,
+            )
+
+        # Low confidence: the agent is uncertain; escalate immediately to avoid
+        # sending a wrong or harmful answer to the customer.
         return RoutingDecision(
-            action="auto_send",
+            action="escalate",
             confidence=confidence,
-            reason="TODO: implement routing logic",
-            priority="low",
-            requires_human=False,
-        )  # TODO: Replace with implementation
+            reason="Low confidence — escalating",
+            priority="high",
+            requires_human=True,
+        )
 
 
 # ============================================================
@@ -109,27 +124,75 @@ class ConfidenceRouter:
 hitl_decision_points = [
     {
         "id": 1,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
+        "name": "Large / Unusual Money Transfer",
+        # Triggered when a customer requests a transfer that exceeds normal limits
+        # or is to an unfamiliar recipient — classic fraud vector.
+        "trigger": (
+            "Transfer amount exceeds 50 million VND, or destination account is new "
+            "(not transacted with in the past 30 days), or the request is made from "
+            "a new device / IP address."
+        ),
+        "hitl_model": "human-in-the-loop",
+        # The human agent must actively approve or deny before the transaction proceeds.
+        "context_needed": (
+            "Customer ID, full transaction history for last 90 days, flagged amount, "
+            "destination account owner name, current session device/IP, fraud score."
+        ),
+        "example": (
+            "Customer asks to transfer 200 million VND to a new account at 11 PM "
+            "from a device that has never been used before. Agent flags as suspicious, "
+            "queues for immediate human review. Human calls customer to verify identity "
+            "before approving."
+        ),
     },
     {
         "id": 2,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
+        "name": "Fraud / Dispute Claim",
+        # Customers reporting fraud or disputing charges need empathy and legal accuracy
+        # — two things a purely automated system handles poorly.
+        "trigger": (
+            "Customer message contains keywords: 'unauthorised', 'I did not make', "
+            "'stolen', 'dispute', 'fraud', or LLM-as-Judge TONE score ≤ 2 on a "
+            "complaint-type conversation."
+        ),
+        "hitl_model": "human-on-the-loop",
+        # AI drafts a response and opens a ticket; human reviews the draft and the
+        # case before it is sent (can override without blocking the queue).
+        "context_needed": (
+            "Recent transaction list, dispute amount, customer account status, "
+            "any prior dispute history, AI-drafted response, relevant bank policy snippet."
+        ),
+        "example": (
+            "Customer: 'There are three charges I never made on my card last night.' "
+            "The agent opens a fraud case, drafts a response, and routes to the fraud "
+            "team queue. A human specialist reviews the draft, attaches the chargeback "
+            "form link, and sends it within 15 minutes."
+        ),
     },
     {
         "id": 3,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
+        "name": "Account Closure or Critical Data Change",
+        # Irreversible actions (account closure, change of registered phone/email)
+        # carry high risk if processed based on a compromised or confused session.
+        "trigger": (
+            "Detected intent to close account, delete data, or change primary contact "
+            "details (phone number, email, legal name). ConfidenceRouter always routes "
+            "these to 'escalate' regardless of confidence score."
+        ),
+        "hitl_model": "human-in-the-loop",
+        # Full stop — no automation proceeds until a human verifies identity
+        # via out-of-band channel (phone call or branch visit).
+        "context_needed": (
+            "Customer identity documents on file, reason for closure / change, "
+            "outstanding balances or linked products, last login details, verification "
+            "status (KYC level)."
+        ),
+        "example": (
+            "Customer requests to close their savings account and transfer the balance "
+            "out. The AI collects the request details and informs the customer that a "
+            "relationship manager will call within 2 business hours to verify identity "
+            "and complete the process — nothing is actioned automatically."
+        ),
     },
 ]
 

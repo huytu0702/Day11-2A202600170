@@ -37,10 +37,33 @@ def detect_injection(user_input: str) -> bool:
     Returns:
         True if injection detected, False otherwise
     """
+    # Each pattern targets a distinct injection technique.
+    # Using IGNORECASE so attackers cannot bypass with capitalisation tricks.
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        # Classic instruction-override phrases
+        r"ignore (all )?(previous|above|prior) instructions?",
+        r"forget (all )?(your|previous|prior) instructions?",
+        r"disregard (all )?(previous|prior|above) (instructions?|directives?)",
+        r"override (your )?(system|instructions?|prompt)",
+        # Role-confusion attacks (DAN, jailbreak personas)
+        r"you are now\b",
+        r"pretend (you are|to be)\b",
+        r"act as (a |an )?((un)?restricted|evil|jailbreak|DAN)",
+        r"\bDAN\b",  # Do Anything Now persona
+        # System-prompt extraction
+        r"(reveal|show|print|output|display|repeat|translate|convert|reformat)\s+(your\s+)?(system\s*)?(prompt|instructions?|config(uration)?)",
+        r"(translate|convert|output|format).*(json|yaml|xml|base64|rot13)",
+        r"what (are|were) your instructions",
+        # Vietnamese injection patterns
+        r"bỏ qua (mọi|tất cả|các) (hướng dẫn|chỉ thị|lệnh)",
+        r"tiết lộ (mật khẩu|api key|thông tin nội bộ)",
+        r"cho tôi (xem|biết) (system prompt|mật khẩu|hướng dẫn)",
+        # Password / credential extraction
+        r"(password|api.?key|secret|credential|token)\s*(is|=|:)\s*\S+",
+        r"fill.{0,30}(password|api.?key|secret)\s*(is|=|:|___)",
+        # Authority / audit impersonation
+        r"(i am|i'm|as) (the )?(ciso|admin|developer|auditor|security team|it (team|intern))",
+        r"(audit|compliance|security).{0,20}(confirm|verify|provide).{0,30}(password|key|credential|secret)",
     ]
 
     for pattern in INJECTION_PATTERNS:
@@ -68,14 +91,25 @@ def topic_filter(user_input: str) -> bool:
     Returns:
         True if input should be BLOCKED (off-topic or blocked topic)
     """
+    # Empty input is ambiguous — let the injection check handle it; pass through here.
+    if not user_input.strip():
+        return False
+
     input_lower = user_input.lower()
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return True
-    # 2. If input doesn't contain any allowed topic -> return True
-    # 3. Otherwise -> return False (allow)
+    # Step 1: Hard-block on any explicitly dangerous topic regardless of banking context.
+    for blocked in BLOCKED_TOPICS:
+        if blocked in input_lower:
+            return True
 
-    pass  # Replace with your implementation
+    # Step 2: Require at least one allowed banking keyword.
+    # If none match, the query is off-topic for a banking assistant.
+    for allowed in ALLOWED_TOPICS:
+        if allowed in input_lower:
+            return False  # On-topic — allow
+
+    # No allowed topic found → block as off-topic.
+    return True
 
 
 # ============================================================
@@ -90,12 +124,21 @@ def topic_filter(user_input: str) -> bool:
 # ============================================================
 
 class InputGuardrailPlugin(base_plugin.BasePlugin):
-    """Plugin that blocks bad input before it reaches the LLM."""
+    """Plugin that blocks bad input before it reaches the LLM.
+
+    Uses the two-callback pattern recommended by ADK:
+      on_user_message_callback — inspects user text, stores block flag
+      before_run_callback      — emits block Content as early-exit event
+    This ensures the LLM is never called for blocked requests, and the
+    block message is returned as the visible final response.
+    """
 
     def __init__(self):
         super().__init__(name="input_guardrail")
         self.blocked_count = 0
         self.total_count = 0
+        # invocation_id -> block Content (set in on_user_message, read in before_run)
+        self._pending_blocks: dict[str, types.Content] = {}
 
     def _extract_text(self, content: types.Content) -> str:
         """Extract plain text from a Content object."""
@@ -119,23 +162,52 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         invocation_context: InvocationContext,
         user_message: types.Content,
     ) -> types.Content | None:
-        """Check user message before sending to the agent.
+        """Detect injection/off-topic — store block flag if needed.
 
-        Returns:
-            None if message is safe (let it through),
-            types.Content if message is blocked (return replacement)
+        Returns None always (does not replace user message).
+        The actual blocking happens in before_run_callback.
         """
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 3. If both are False: return None (let message through)
+        inv_id = getattr(invocation_context, "invocation_id", None)
 
-        pass  # Replace with your implementation
+        # Layer 1 check: prompt injection patterns (regex-based).
+        if detect_injection(text):
+            self.blocked_count += 1
+            if inv_id:
+                self._pending_blocks[inv_id] = self._block_response(
+                    "I'm sorry, I cannot process that request. "
+                    "Please ask me about banking services, account inquiries, or transactions."
+                )
+            return None
+
+        # Layer 2 check: topic filter.
+        if topic_filter(text):
+            self.blocked_count += 1
+            if inv_id:
+                self._pending_blocks[inv_id] = self._block_response(
+                    "I can only assist with banking-related questions such as accounts, "
+                    "transactions, loans, and interest rates. How can I help you today?"
+                )
+            return None
+
+        return None
+
+    async def before_run_callback(
+        self,
+        *,
+        invocation_context: InvocationContext,
+    ) -> types.Content | None:
+        """Emit block Content as the final response for flagged invocations.
+
+        Returning a non-None Content here causes ADK to emit it as an event
+        and exit immediately without calling the LLM.
+        """
+        inv_id = getattr(invocation_context, "invocation_id", None)
+        if inv_id and inv_id in self._pending_blocks:
+            return self._pending_blocks.pop(inv_id)
+        return None
 
 
 # ============================================================
